@@ -1,0 +1,17 @@
+---
+title: "explore-masters"
+output: html_document
+date: "2023-03-16"
+---
+
+```{r}
+# Paquetes ----------------------------------------------------------------
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(here, DataExplorer, readxl, dplyr)
+
+
+# Data --------------------------------------------------------------------
+cobupem_main <- read_excel(here("import", "input", "EXPEDIENTE.xlsx"))
+
+```
+

@@ -1,0 +1,293 @@
+---
+title: "text-vivos-cobupem"
+author: "Jorge Ruiz"
+date: "2023-06-13"
+output: html_document
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = FALSE,
+                      warning = FALSE,
+                      cache = FALSE,
+                      fig.width = 8, 
+                      fig.height = 6)
+```
+
+
+```{r}
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(here, tidyverse, tidytext)
+
+
+cobupem_data <- read_rds(here("join", "output", "cobupem_clean_final.rds")) %>%
+  select(idunico, localizado_vivo_muerto, text_cobupem) %>% 
+  filter(localizado_vivo_muerto != "SIGUE DESAPARECIDA") %>% 
+  mutate(text_cobupem = str_remove_all(text_cobupem, "NA|NA"),
+         text_cobupem = na_if(text_cobupem, "___"),
+         text_cobupem = gsub("_","", text_cobupem),
+         localizado_vivo_muerto = 
+           factor(localizado_vivo_muerto, levels = c("VIVO", "MUERTO"))
+         )%>% 
+  drop_na(text_cobupem) %>%
+  mutate(document = row_number())
+```
+
+
+
+
+```{r}
+custom_stop_words <- bind_rows(stop_words,
+                               tibble(word = tm::stopwords("spanish"),
+                                      lexicom = "custom"))
+
+```
+
+
+
+
+```{r}
+tidy_cobupem <- cobupem_data %>%
+  unnest_tokens(word, text_cobupem) %>%
+  group_by(word) %>%
+  filter(!str_detect(word, "[0-9]")) %>% 
+  filter(n() > 10) %>%
+  ungroup()
+
+tidy_cobupem
+```
+
+
+
+```{r}
+tidy_cobupem %>%
+  count(localizado_vivo_muerto, word, sort = TRUE) %>%
+  anti_join(custom_stop_words) %>%
+  group_by(localizado_vivo_muerto) %>%
+  top_n(20) %>%
+  ungroup() %>%
+  ggplot(aes(reorder_within(word, n, localizado_vivo_muerto), n,
+    fill = localizado_vivo_muerto
+  )) +
+  geom_col(alpha = 0.8, show.legend = FALSE) +
+  scale_x_reordered() +
+  coord_flip() +
+  facet_wrap(~localizado_vivo_muerto, scales = "free") +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(
+    x = NULL, y = "Word count",
+    title = "Most frequent words after removing stop words"
+  )
+```
+
+```{r}
+# tf-idf 
+estatus <- tidy_cobupem %>% 
+   count(word, localizado_vivo_muerto, sort = TRUE) %>%
+   ungroup() 
+
+
+
+# sacar TF-IDF 
+estatus_tf <- estatus %>% 
+   bind_tf_idf(word, localizado_vivo_muerto, n)  %>%
+   filter(!word %in% c("fho")) %>% 
+   arrange(-tf_idf) %>%
+   ungroup() %>%
+   group_by(localizado_vivo_muerto) %>%
+   top_n(5)
+```
+
+
+```{r}
+estatus_tf %>%
+   ggplot(aes(reorder(word, tf_idf), tf_idf, fill= localizado_vivo_muerto)) +
+   geom_col() +
+   coord_flip() +
+   facet_wrap(~ localizado_vivo_muerto, scales = "free", ncol = 3) +
+   theme_classic(base_family = "Courier New") +
+   theme(plot.title = element_text(face = "bold", hjust = 0.5),
+         plot.subtitle = element_text(face = "bold", hjust = 0.5),
+         panel.grid.major.x = element_line(colour="grey", size=0.5),
+         axis.text.y = element_text(face = "bold", size = 12),
+         strip.background = element_blank(),
+         strip.text = element_text(size = 14, face = "bold")) +
+   labs(y = NULL,
+        x = NULL,
+        title = "TF-IDF estatus EDOMEX")
+```
+
+
+
+# MODEL 
+```{r}
+library(rsample)
+
+cobupem_split <- cobupem_data %>%
+  select(document) %>%
+  initial_split()
+train_data <- training(cobupem_split)
+test_data <- testing(cobupem_split)
+```
+
+
+```{r}
+sparse_words <- tidy_cobupem %>%
+  count(document, word) %>%
+  inner_join(train_data) %>%
+  cast_sparse(document, word, n)
+
+class(sparse_words)
+```
+
+
+```{r}
+dim(sparse_words)
+```
+
+
+
+
+```{r}
+word_rownames <- as.integer(rownames(sparse_words))
+
+cobupem_joined <- data_frame(document = word_rownames) %>%
+  left_join(cobupem_data %>%
+    select(document, localizado_vivo_muerto))
+```
+
+
+
+
+# Prepare 
+```{r}
+library(glmnet)
+library(doMC)
+registerDoMC(cores = 8)
+
+is_viva <- cobupem_joined$localizado_vivo_muerto == "VIVO"
+model <- cv.glmnet(sparse_words, is_viva,
+  family = "binomial",
+  parallel = TRUE, keep = TRUE
+)
+```
+
+
+
+
+
+```{r}
+plot(model)
+```
+
+
+
+
+```{r}
+plot(model$glmnet.fit)
+```
+
+
+
+# Evaluate 
+```{r}
+library(broom)
+
+coefs <- model$glmnet.fit %>%
+  tidy() %>%
+  filter(lambda == model$lambda.1se)
+```
+
+
+
+
+```{r}
+coefs %>%
+  group_by(estimate > 0) %>%
+  filter(term != "(Intercept)") %>%
+  top_n(10, abs(estimate)) %>%
+  ungroup() %>%
+  ggplot(aes(fct_reorder(term, estimate), estimate, fill = estimate > 0)) +
+  geom_col(alpha = 0.8, show.legend = FALSE) +
+  coord_flip() +
+  labs(
+    x = NULL,
+    title = "Coefficients that increase/decrease probability the most"
+  )
+```
+
+
+
+
+```{r}
+intercept <- coefs %>%
+  filter(term == "(Intercept)") %>%
+  pull(estimate)
+
+classifications <- tidy_cobupem %>%
+  inner_join(test_data) %>%
+  inner_join(coefs, by = c("word" = "term")) %>%
+  group_by(document) %>%
+  summarize(score = sum(estimate)) %>%
+  mutate(probability = plogis(intercept + score))
+
+classifications
+```
+
+
+
+```{r}
+library(yardstick)
+
+comment_classes <- classifications %>%
+  left_join(cobupem_data %>%
+    select(localizado_vivo_muerto, document), by = "document") %>%
+  mutate(localizado_vivo_muerto = as.factor(localizado_vivo_muerto))
+
+comment_classes %>%
+  roc_curve(localizado_vivo_muerto, probability) %>%
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line(
+    color = "midnightblue",
+    size = 1.5
+  ) +
+  geom_abline(
+    lty = 2, alpha = 0.5,
+    color = "gray50",
+    size = 1.2
+  ) +
+  labs(
+    title = "ROC curve for text classification using regularized regression",
+    subtitle = 
+  )
+```
+
+
+
+
+```{r}
+comment_classes %>%
+  roc_auc(localizado_vivo_muerto, probability)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

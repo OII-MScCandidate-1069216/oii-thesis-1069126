@@ -1,0 +1,316 @@
+---
+title: "shap-topics-vivos"
+author: "Jorge Ruiz"
+date: "2023-07-11"
+output: html_document
+---
+
+
+```{r}
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(here, tidyverse, tidymodels, vip,
+               naniar, rlang, stringi, vip, DALEX, DALEXtra, lime, svglite)
+
+
+# function clean 
+clean_text <- function(s){
+      str_squish(tolower(stri_trans_general(s, "latin-ascii")))
+       }
+
+
+
+cobupem_data <- read_rds(here("join", "output", "cobupem_clean_final.rds")) %>%
+  filter(year_evento >= 2006 & year_evento <= 2022 &
+          localizado_vivo_muerto != "SIGUE DESAPARECIDA" & diff_dias >= 0 &
+           diff_dias < 32929) %>% 
+  add_column(runif = runif(nrow(.))) %>% 
+  rename(RANDOM = runif) %>% 
+  select(-expediente, -status, -localizado_fecha,
+         -year_localizado, -municipio_evento,
+         -fecha_evento,  -women_exec_mun_mx, -idunico) %>% 
+  mutate(categoria = replace_na(categoria, "UNKNOWN"),
+         fiscalia = replace_na(fiscalia, "UNKNOWN"),
+         escolaridad_d = replace_na(escolaridad_d, "UNKNOWN"),
+         iba_solo = replace_na(iba_solo, "UNKNOWN"),
+         estado_civil_d = replace_na(estado_civil_d, "UNKNOWN"),
+        localizado_vivo_muerto = 
+           factor(localizado_vivo_muerto, levels = c("VIVO", "MUERTO")
+         ),
+         text_cobupem = clean_text(text_cobupem),
+         text_domicilio = ifelse(grepl("domicilio", text_cobupem), 1, 0),
+         text_casa = ifelse(grepl("casa", text_cobupem), 1, 0),
+         text_hija = ifelse(grepl("hija", text_cobupem), 1, 0),
+         text_menor = ifelse(grepl("menor", text_cobupem), 1, 0),
+         text_encuentra = ifelse(grepl("encuentra", text_cobupem), 1, 0),
+         text_momento = ifelse(grepl("momento", text_cobupem), 1, 0),
+         text_solo = ifelse(grepl("solo", text_cobupem), 1, 0),
+         text_albergue = ifelse(grepl("albergue", text_cobupem), 1, 0),
+         text_nucleo = ifelse(grepl("nucleo", text_cobupem), 1, 0),
+         text_paradero = ifelse(grepl("paradero", text_cobupem), 1, 0),
+         text_regreso = ifelse(grepl("regreso", text_cobupem), 1, 0),
+         text_bueno = ifelse(grepl("bueno", text_cobupem), 1, 0),
+         text_reintegra = ifelse(grepl("reintegra", text_cobupem), 1, 0),
+         text_fisica = ifelse(grepl("fisica", text_cobupem), 1, 0),
+         text_miedo = ifelse(grepl("miedo", text_cobupem), 1, 0),
+         text_aborto = ifelse(grepl("aborto", text_cobupem), 1, 0),
+         text_dia = ifelse(grepl("dia", text_cobupem), 1, 0),
+         text_municipio = ifelse(grepl("municipio", text_cobupem), 1, 0),
+         text_desconoce = ifelse(grepl("desconoce", text_cobupem), 1, 0),
+         text_nombre = ifelse(grepl("nombre", text_cobupem), 1, 0),
+         text_mexico = ifelse(grepl("mexico", text_cobupem), 1, 0),
+         text_numero = ifelse(grepl("numero", text_cobupem), 1, 0),
+         text_lugar = ifelse(grepl("lugar", text_cobupem), 1, 0),
+         text_investigacion = ifelse(grepl("investigacion", text_cobupem), 1, 0),
+         text_fecha = ifelse(grepl("fecha", text_cobupem), 1, 0),
+         text_zumpango = ifelse(grepl("zumpango", text_cobupem), 1, 0),
+         text_anita = ifelse(grepl("anita", text_cobupem), 1, 0),
+         text_desconocidas = ifelse(grepl("desconocidas", text_cobupem), 1, 0),
+         text_micaela = ifelse(grepl("micaela", text_cobupem), 1, 0),
+         text_desaparicion = ifelse(grepl("desaparicion", text_cobupem), 1, 0),
+         text_fho = ifelse(grepl("fho", text_cobupem), 1, 0),
+         text_vida = ifelse(grepl("vida", text_cobupem), 1, 0),
+         text_semefo = ifelse(grepl("semefo", text_cobupem), 1, 0),
+         text_forense = ifelse(grepl("forense", text_cobupem), 1, 0),
+         text_cuerpo = ifelse(grepl("cuerpo", text_cobupem), 1, 0),
+         text_generalizada = ifelse(grepl("generalizada", text_cobupem), 1, 0),
+         text_defuncion = ifelse(grepl("defuncion", text_cobupem), 1, 0),
+         text_fhm = ifelse(grepl("fhm", text_cobupem), 1, 0),
+         text_cadaver = ifelse(grepl("cadaver", text_cobupem), 1, 0),
+         text_defunsion = ifelse(grepl("defunsion", text_cobupem), 1, 0),
+         text_accidente = ifelse(grepl("accidente", text_cobupem), 1, 0),
+         text_ahogado = ifelse(grepl("ahogado", text_cobupem), 1, 0)
+           )  %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate_if(is.numeric, funs(replace(., is.na(.), median(., na.rm = TRUE)))) %>% 
+  drop_na(inegi)  %>% 
+  arrange(year_evento)  %>% 
+  select(-inegi, -text_cobupem)
+```
+
+
+```{r}
+# Files -------------------------------------------------------------------
+files <- list(break_vivo = here("output-models", "breakdown-vivo."),
+              break_muerto = here("output-models", "breakdown-muerto."),
+              shap_vivo = here("output-models", "shap-vivo."),
+              shap_muerto = here("output-models", "shap-muerto."),
+              lime_vivo = here("output-models", "lime-vivo."),
+              lime_muerto = here("output-models", "lime-muerto.")
+              )
+
+
+
+
+devices <- c("png", "svg")
+```
+
+
+
+
+# split data
+
+```{r}
+set.seed(123)
+splits  <- initial_time_split(cobupem_data, strata = localizado_vivo_muerto)
+
+cobupem_train <- training(splits)
+cobupem_test <- testing(splits)
+```
+
+
+
+```{r}
+cobupem_train %>% count(year_evento, sort = T)
+```
+
+
+
+
+```{r}
+set.seed(234)
+cobupem_validation <- validation_time_split(cobupem_train, strata = localizado_vivo_muerto)
+cobupem_validation
+```
+
+
+
+
+# Prepare model 
+```{r}
+doParallel::registerDoParallel()
+
+# set up recipe and transformation steps and roles
+ranger_recipe <- 
+  recipe(formula = localizado_vivo_muerto ~ ., 
+         data = cobupem_train) 
+
+#define model
+ranger_spec <- 
+  rand_forest() %>% 
+  set_mode("classification") %>% 
+  set_engine("ranger", importance = "permutation")
+
+#create workflow
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe) %>% 
+  add_model(ranger_spec) 
+
+#fit the model
+set.seed(712) # for reproducibility - random sampling in random forest choosing number of variables
+ranger_fit <- ranger_workflow %>% 
+  fit(cobupem_train)
+```
+
+
+# Explainer 
+
+```{r}
+rf_explain <- 
+  explain_tidymodels(
+    model = ranger_fit,
+    data = cobupem_train %>% select(-localizado_vivo_muerto), 
+    y = as.integer(cobupem_train$localizado_vivo_muerto),
+    predict_function_target_column = 1,
+    label = "rf"
+  )
+```
+
+
+
+
+```{r}
+new_obs <- cobupem_test %>% slice(305) 
+new_obs %>% select(sexo_d, edad_d, localizado_vivo_muerto)
+```
+
+```{r}
+new_obs_two <- cobupem_test %>% slice(101)
+new_obs_two %>% select(sexo_d, edad_d, localizado_vivo_muerto)
+```
+
+
+```{r}
+#Change order
+pp_rf_ord1 <- predict_parts(explainer = rf_explain,
+                            new_observation = new_obs,
+                            type = "break_down") 
+# Break-down plot
+plot(pp_rf_ord1) +
+  labs(subtitle = "Located alive")
+
+walk(devices, ~ ggsave(filename = file.path(paste0(files$break_vivo, .x)),
+                      device = .x, width = 10, height = 8))
+
+```
+
+
+
+```{r}
+#Change order
+pp_rf_ord2 <- predict_parts(explainer = rf_explain,
+                            new_observation = new_obs_two,
+                            type = "break_down") 
+# Break-down plot
+plot(pp_rf_ord2) +
+  labs(subtitle = "Located dead")
+
+walk(devices, ~ ggsave(filename = file.path(paste0(files$break_muerto, .x)),
+                   device = .x, width = 10, height = 8))
+
+```
+
+
+
+
+
+```{r}
+rf_shap <-predict_parts(explainer = rf_explain,
+                        new_observation = new_obs,
+                        type = "shap",
+                        B = 10 #number of reorderings - start small
+)
+
+plot(rf_shap) +
+  labs(title = "Shapley - located alive")
+
+walk(devices, ~ ggsave(filename = file.path(paste0(files$shap_vivo, .x)),
+                     device = .x, width = 10, height = 8))
+
+```
+
+```{r}
+rf_shap
+```
+
+
+
+
+```{r}
+rf_shap_two <-predict_parts(explainer = rf_explain,
+                        new_observation = new_obs_two,
+                        type = "shap",
+                        B = 10 #number of reorderings - start small
+)
+
+plot(rf_shap_two) +
+  labs(title = "Shapley - located dead")
+
+walk(devices, ~ ggsave(filename = file.path(paste0(files$shap_muerto, .x)),
+                     device = .x, width = 10, height = 8))
+
+```
+```{r}
+rf_shap_two
+```
+
+
+
+
+# Dalex 
+```{r}
+model_type.dalex_explainer <- DALEXtra::model_type.dalex_explainer
+predict_model.dalex_explainer <- DALEXtra::predict_model.dalex_explainer
+
+lime_rf <- predict_surrogate(explainer = rf_explain,
+                             new_observation = new_obs %>%
+                               select(-localizado_vivo_muerto), 
+                             n_features = 5,
+                             n_permutations = 1000,
+                             type = "lime")
+```
+
+
+
+
+
+```{r}
+plot(lime_rf) +
+  labs(x = "Variable") 
+
+walk(devices, ~ ggsave(filename = file.path(paste0(files$lime_vivo, .x)),
+                       device = .x, width = 10, height = 8))
+
+```
+
+
+```{r}
+lime_rf_two <- predict_surrogate(explainer = rf_explain,
+                             new_observation = new_obs_two %>%
+                               select(-localizado_vivo_muerto), 
+                             n_features = 5,
+                             n_permutations = 1000,
+                             type = "lime")
+```
+
+
+```{r}
+plot(lime_rf_two) +
+  labs(x = "Variable")
+
+walk(devices, ~ ggsave(filename = file.path(paste0(files$lime_muerto, .x)),
+                       device = .x, width = 10, height = 8))
+```
+
+
+

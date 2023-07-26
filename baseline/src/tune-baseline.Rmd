@@ -1,0 +1,220 @@
+---
+title: "tuning-baseline"
+output: html_document
+date: "2023-05-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = FALSE,
+                      warning = FALSE,
+                      cache = FALSE,
+                      fig.width = 8, 
+                      fig.height = 6)
+```
+
+
+
+```{r}
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(here, tidyverse, tidymodels, GGally, vip,
+               themis, naniar, DALEX, DALEXtra)
+
+
+desp_data <- read_rds(here("import", "output", "baseline.rds")) %>% 
+  filter(YEAR_EVENTO >= 2006 & YEAR_EVENTO <= 2022 &
+           LOCALIZADO_VIVO_MUERTO != "SIGUE DESAPARECIDA" & DIFF_DIAS >= 0 &
+           DIFF_DIAS < 32929) %>% 
+  add_column(runif = runif(nrow(.))) %>% 
+  rename(RANDOM = runif)
+```
+
+
+
+```{r}
+gg_miss_var(desp_data)
+```
+
+
+```{r}
+ggpairs(desp_data, mapping = aes(color = LOCALIZADO_VIVO_MUERTO), columns = c("SEXO_D", "EDAD_D", "YEAR_EVENTO", "DIFF_DIAS", "CATEGORIA",  "RANDOM")) +
+  theme_minimal()
+```
+
+
+
+
+# 2. SPLIT DATA  
+
+
+```{r}
+## prepare data 
+final_df <- desp_data %>% 
+  arrange(YEAR_EVENTO) %>% 
+  na.omit() %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate(LOCALIZADO_VIVO_MUERTO = 
+           factor(LOCALIZADO_VIVO_MUERTO, levels = c("VIVO", "MUERTO"))
+         )
+```
+
+
+```{r}
+final_df %>% count(LOCALIZADO_VIVO_MUERTO)
+```
+
+
+
+
+
+```{r}
+set.seed(123)
+splits  <- initial_time_split(final_df, strata = LOCALIZADO_VIVO_MUERTO)
+
+desp_train <- training(splits)
+desp_test <- testing(splits)
+```
+
+
+
+```{r}
+set.seed(234)
+desp_validation <- validation_time_split(desp_train, strata = LOCALIZADO_VIVO_MUERTO)
+desp_validation
+```
+
+
+```{r}
+cores <- parallel::detectCores()
+cores
+```
+
+
+```{r}
+rf_mod <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_engine("ranger", num.threads = cores) %>% 
+  set_mode("classification")
+```
+
+
+```{r}
+rf_recipe <- 
+  recipe(LOCALIZADO_VIVO_MUERTO ~ ., data = desp_train) %>% 
+  step_impute_mode(CATEGORIA) %>% 
+  step_impute_mean(EDAD_D, YEAR_EVENTO, DIFF_DIAS) %>% 
+  step_dummy(all_nominal(), -LOCALIZADO_VIVO_MUERTO) %>% 
+  step_smote(LOCALIZADO_VIVO_MUERTO)
+```
+
+
+```{r}
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(rf_recipe)
+```
+
+
+# Train
+
+```{r}
+set.seed(345)
+rf_res <- 
+  rf_workflow %>% 
+  tune_grid(desp_validation,
+            grid = 25,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy))
+```
+
+
+
+```{r}
+rf_res %>% 
+  show_best(metric = "bal_accuracy")
+```
+
+
+```{r}
+autoplot(rf_res)
+```
+
+
+
+```{r}
+rf_best <- 
+  rf_res %>% 
+  select_best(metric = "bal_accuracy")
+rf_best
+```
+
+
+```{r}
+rf_res %>% collect_metrics()
+```
+
+
+
+```{r}
+rf_res %>% 
+  collect_predictions()
+```
+
+```{r}
+rf_res %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(LOCALIZADO_VIVO_MUERTO, .pred_VIVO) %>%
+  ggplot(aes(1 - specificity, sensitivity, color = id)) +
+  geom_abline(lty = 2, color = "gray80", size = 1.5) +
+  geom_path(show.legend = FALSE, alpha = 0.6, size = 1.2) +
+  coord_equal()
+```
+
+# Test set 
+```{r}
+last_rf_mod <- 
+  rand_forest(mtry = 1, min_n = 14, trees = 1000) %>% 
+  set_engine("ranger", num.threads = cores, importance = "permutation") %>% 
+  set_mode("classification")
+
+# the last workflow
+last_rf_workflow <- 
+  rf_workflow %>% 
+  update_model(last_rf_mod)
+
+# the last fit
+set.seed(345)
+last_rf_fit <- 
+  last_rf_workflow %>% 
+  last_fit(splits,
+           metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy))
+
+last_rf_fit
+```
+
+
+
+```{r}
+last_rf_fit %>% 
+  collect_metrics()
+```
+
+
+```{r}
+collect_predictions(last_rf_fit) %>%
+  conf_mat(LOCALIZADO_VIVO_MUERTO, .pred_class)
+```
+
+```{r}
+last_rf_fit %>%
+ extract_fit_parsnip() %>% 
+  vip()
+```
+
+
+
+
+
+

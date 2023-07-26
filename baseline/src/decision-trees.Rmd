@@ -1,0 +1,121 @@
+---
+title: "decision trees"
+output: html_document
+date: "2023-05-25"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = FALSE,
+                      warning = FALSE,
+                      cache = FALSE,
+                      fig.width = 8, 
+                      fig.height = 6)
+```
+
+
+```{r}
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(here, tidyverse, tidymodels, GGally, vip,
+               naniar, rlang, rpart.plot)
+
+
+desp_data <- read_rds(here("import", "output", "baseline.rds")) %>% 
+  filter(YEAR_EVENTO >= 2006 & YEAR_EVENTO <= 2022 &
+           LOCALIZADO_VIVO_MUERTO != "SIGUE DESAPARECIDA" & DIFF_DIAS >= 0 &
+           DIFF_DIAS < 32929) %>% 
+  add_column(runif = runif(nrow(.))) %>% 
+  rename(RANDOM = runif)
+```
+
+
+```{r}
+desp_data %>% 
+  count(LOCALIZADO_VIVO_MUERTO, CATEGORIA) %>% 
+  ggplot(aes(LOCALIZADO_VIVO_MUERTO, n, fill = CATEGORIA)) +
+  geom_col()
+```
+
+
+# 2. SPLIT DATA  
+
+
+```{r}
+## prepare data 
+final_df <- desp_data %>% 
+  arrange(YEAR_EVENTO) %>% 
+  na.omit() %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate(LOCALIZADO_VIVO_MUERTO = 
+           factor(LOCALIZADO_VIVO_MUERTO, levels = c("VIVO", "MUERTO"))
+         )
+```
+
+
+
+```{r}
+set.seed(123)
+splits  <- initial_time_split(final_df, strata = LOCALIZADO_VIVO_MUERTO)
+
+desp_train <- training(splits)
+desp_test <- testing(splits)
+```
+
+
+```{r}
+set.seed(1234)
+desp_fold <- vfold_cv(desp_train)
+```
+
+
+```{r}
+tree_spec <- decision_tree() %>%
+  set_engine("rpart")
+
+desp_tree_spec <- tree_spec %>%
+  set_mode("classification")
+```
+
+
+
+```{r}
+desp_tree_wf <- workflow() %>%
+  add_model(desp_tree_spec %>% set_args(cost_complexity = tune())) %>%
+  add_formula(LOCALIZADO_VIVO_MUERTO ~ .)
+```
+
+
+
+```{r}
+param_grid <- grid_regular(cost_complexity(range = c(-3, -1)), levels = 10)
+
+tune_res <- tune_grid(
+  desp_tree_wf, 
+  resamples = desp_fold, 
+  grid = param_grid, 
+  metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy, sensitivity, specificity)
+)
+```
+
+```{r}
+best_complexity <- select_best(tune_res)
+
+desp_tree_final <- finalize_workflow(desp_tree_wf, best_complexity)
+
+desp_tree_final_fit <- fit(desp_tree_final, data = desp_train)
+desp_tree_final_fit
+```
+
+```{r}
+desp_tree_final_fit %>%
+  extract_fit_engine() %>%
+  rpart.plot()
+```
+
+
+
+
+
+
+

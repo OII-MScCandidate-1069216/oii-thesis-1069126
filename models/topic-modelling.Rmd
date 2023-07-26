@@ -1,0 +1,154 @@
+---
+title: "topic-modelling"
+author: "Jorge Ruiz"
+date: "2023-06-17"
+output: html_document
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = FALSE,
+                      warning = FALSE,
+                      cache = FALSE,
+                      fig.width = 8, 
+                      fig.height = 6)
+```
+
+
+
+
+```{r}
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(here, tidyverse, tidymodels, vip,
+               naniar, tidytext, stm)
+
+
+cobupem_data <- read_rds(here("join", "output", "cobupem_clean_final.rds")) %>%
+  filter(year_evento >= 2006 & year_evento <= 2022 &
+          localizado_vivo_muerto != "SIGUE DESAPARECIDA" & diff_dias >= 0 &
+           diff_dias < 32929) %>% 
+  add_column(runif = runif(nrow(.))) %>% 
+  select(4:19) %>% 
+  add_column(runif = runif(nrow(.))) %>% 
+  rename(RANDOM = runif) %>%
+  mutate(categoria = replace_na(categoria, "UNKNOWN"),
+         fiscalia = replace_na(fiscalia, "UNKNOWN"),
+         escolaridad_d = replace_na(escolaridad_d, "UNKNOWN"),
+         iba_solo = replace_na(escolaridad_d, "UNKNOWN"),
+         estado_civil_d = replace_na(estado_civil_d, "UNKNOWN"),
+         text_cobupem = str_remove_all(text_cobupem, "NA|NA"),
+         text_cobupem = na_if(text_cobupem, "___"),
+         text_cobupem = gsub("_","", text_cobupem)) %>% 
+  mutate_if(is.character, as.factor) %>% 
+  arrange(year_evento)  %>% 
+  mutate(localizado_vivo_muerto = 
+           factor(localizado_vivo_muerto, levels = c("VIVO", "MUERTO"))
+         ) %>% 
+  select(-fecha_evento, -year_localizado, -localizado_fecha,
+         -municipio_evento)  %>% 
+   mutate_at(vars(talla_d, edad_d),~ifelse(is.na(.x), mean(.x, na.rm = TRUE), .x))
+```
+
+
+
+```{r}
+custom_stop_words <- bind_rows(stop_words,
+                               tibble(word = tm::stopwords("spanish"),
+                                      lexicom = "custom"))
+
+```
+
+
+```{r}
+tidy_cobupem <-
+  cobupem_data %>%
+  mutate(text_cobupem = as.character(text_cobupem)) %>% 
+  unnest_tokens(word, text_cobupem) %>%
+  anti_join(custom_stop_words) %>% 
+  filter(!str_detect(word, "[0-9]")) %>% 
+  filter(!word %in% c("reportante", "refiere")) 
+```
+
+
+```{r}
+tidy_cobupem %>%
+  count(word, sort = TRUE)
+```
+
+
+# Train topic model 
+
+
+```{r}
+cobupem_sparse <-
+  tidy_cobupem %>%
+  count(localizado_vivo_muerto, word) %>%
+  cast_sparse(localizado_vivo_muerto, word, n)
+
+dim(cobupem_sparse)
+```
+
+
+
+
+```{r}
+set.seed(123)
+topic_model <- stm(cobupem_sparse, K = 4, verbose = FALSE)
+```
+
+
+
+```{r}
+summary(topic_model)
+```
+
+# Explore topics
+```{r}
+word_topics <- tidy(topic_model, matrix = "beta")
+word_topics
+```
+
+
+
+
+```{r}
+word_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>%
+  ungroup() %>%
+  mutate(topic = paste("Topic", topic)) %>%
+  ggplot(aes(beta, reorder_within(term, beta, topic), fill = topic)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(vars(topic), scales = "free_y") +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_reordered() +
+  labs(x = expression(beta), y = NULL)
+```
+
+```{r}
+cobupem_topics <- tidy(topic_model,
+  matrix = "gamma",
+  document_names = rownames(cobupem_sparse)
+)
+cobupem_topics
+```
+
+
+```{r}
+cobupem_topics %>%
+  mutate(
+    localizado_vivo_muerto = fct_reorder(document, gamma),
+    topic = factor(topic)
+  ) %>%
+  ggplot(aes(gamma, topic, fill = topic)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(vars(localizado_vivo_muerto), ncol = 4) +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(x = expression(gamma), y = "Topic")
+```
+
+
+
+

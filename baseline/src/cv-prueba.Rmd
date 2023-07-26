@@ -1,0 +1,229 @@
+---
+title: "prueba-cvtime"
+output: html_document
+date: "2023-05-04"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = FALSE,
+                      warning = FALSE,
+                      cache = FALSE,
+                      fig.width = 8, 
+                      fig.height = 6)
+```
+
+
+
+```{r}
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(here, tidyverse, tidymodels, GGally, vip,
+               themis, naniar,  timetk)
+
+
+desp_data <- read_rds(here("import", "output", "baseline_date.rds")) %>% 
+  filter(YEAR_EVENTO >= 2006 & YEAR_EVENTO <= 2022 &
+           LOCALIZADO_VIVO_MUERTO != "SIGUE DESAPARECIDA" & DIFF_DIAS >= 0 &
+           DIFF_DIAS < 32929) %>% 
+  add_column(runif = runif(nrow(.))) %>% 
+  rename(RANDOM = runif)
+```
+
+
+
+
+```{r}
+## prepare data 
+final_df <- desp_data %>% 
+  arrange(YEAR_EVENTO) %>% 
+  na.omit() %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate(LOCALIZADO_VIVO_MUERTO = 
+           factor(LOCALIZADO_VIVO_MUERTO, levels = c("VIVO", "MUERTO"))
+         )
+```
+
+
+
+```{r}
+set.seed(123)
+splits  <- initial_time_split(final_df, strata = LOCALIZADO_VIVO_MUERTO)
+
+desp_train <- training(splits)
+desp_test <- testing(splits)
+```
+
+
+
+
+```{r}
+set.seed(234)
+desp_train <- desp_train %>% arrange(FECHA_EVENTO) 
+desp_folds <- rolling_origin(desp_train,
+                             initial = 5,
+                             assess = 1,
+                             cumulative = F,
+                             skip = 0,
+                             lag = 0)
+```
+
+
+
+```{r}
+range(desp_train$FECHA_EVENTO)
+```
+
+```{r}
+range(desp_test$FECHA_EVENTO)
+```
+
+
+```{r}
+desp_folds
+```
+
+
+# Prepare models 
+
+
+```{r}
+### logistic regression 
+glm_spec <- logistic_reg() %>%
+  set_engine("glm") %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors())
+
+glm_spec
+```
+
+
+
+
+```{r}
+### Decision tree
+tree_spec <-
+  decision_tree() %>%
+  set_mode("classification") %>%
+  set_engine("rpart") %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors())
+
+tree_spec
+```
+
+
+
+
+```{r}
+## Random forest 
+rf_spec <- rand_forest() %>%
+  set_mode("classification") %>%
+  set_engine("ranger", importance = "permutation")
+
+rf_spec
+```
+
+
+
+```{r}
+desp_wf <- workflow() %>%
+  add_formula(LOCALIZADO_VIVO_MUERTO ~ .)
+
+desp_wf
+```
+
+
+### Fit models on traint/validation
+
+```{r}
+glm_rs <- desp_wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples = desp_folds,
+    control = control_resamples(save_pred = TRUE),
+    metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy)
+  )
+
+glm_rs
+```
+
+
+
+```{r}
+tree_rs <- desp_wf %>%
+  add_model(tree_spec) %>%
+  fit_resamples(
+    resamples = desp_folds,
+    control = control_resamples(save_pred = TRUE),
+    metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy)
+  )
+
+tree_rs
+```
+
+
+
+```{r}
+rf_rs <- desp_wf %>%
+  add_model(rf_spec) %>%
+  fit_resamples(
+    resamples = desp_folds,
+    control = control_resamples(save_pred = TRUE),
+    metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy)
+  )
+
+rf_rs
+```
+
+
+
+
+# Evaluate 
+
+## GLM 
+
+```{r}
+collect_metrics(glm_rs)
+```
+
+
+
+```{r}
+glm_rs %>%
+  conf_mat_resampled()
+```
+
+
+## Decision tree 
+
+```{r}
+collect_metrics(tree_rs)
+```
+
+
+
+```{r}
+tree_rs %>%
+  conf_mat_resampled()
+```
+
+
+
+```{r}
+tree_auc <- tree_rs %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(LOCALIZADO_VIVO_MUERTO, .pred_VIVO) %>%
+  mutate(model = "Decision tree")
+```
+
+
+
+
+
+
+
+

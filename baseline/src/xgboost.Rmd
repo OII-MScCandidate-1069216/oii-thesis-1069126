@@ -1,0 +1,198 @@
+---
+title: "xgboost"
+output: html_document
+date: "2023-05-15"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = FALSE,
+                      warning = FALSE,
+                      cache = FALSE,
+                      fig.width = 8, 
+                      fig.height = 6)
+```
+
+
+```{r}
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(here, tidyverse, tidymodels, GGally, vip,
+               naniar)
+
+
+desp_data <- read_rds(here("import", "output", "baseline.rds")) %>% 
+  filter(YEAR_EVENTO >= 2006 & YEAR_EVENTO <= 2022 &
+           LOCALIZADO_VIVO_MUERTO != "SIGUE DESAPARECIDA" & DIFF_DIAS >= 0 &
+           DIFF_DIAS < 32929) %>% 
+  add_column(runif = runif(nrow(.))) %>% 
+  rename(RANDOM = runif)
+```
+
+
+
+
+# 2. SPLIT DATA  
+
+```{r}
+## prepare data 
+final_df <- desp_data %>% 
+  arrange(YEAR_EVENTO) %>% 
+  na.omit() %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate(LOCALIZADO_VIVO_MUERTO = 
+           factor(LOCALIZADO_VIVO_MUERTO, levels = c("VIVO", "MUERTO"))
+         )
+```
+
+
+```{r}
+desp_data %>% count(LOCALIZADO_VIVO_MUERTO)
+```
+
+
+
+```{r}
+set.seed(123)
+splits  <- initial_time_split(final_df, strata = LOCALIZADO_VIVO_MUERTO)
+
+desp_train <- training(splits)
+desp_test <- testing(splits)
+```
+
+
+
+```{r}
+set.seed(234)
+desp_validation <- validation_time_split(desp_train, strata = LOCALIZADO_VIVO_MUERTO)
+desp_validation
+```
+
+
+# Prepare models 
+
+```{r}
+xgb_spec <- boost_tree(
+  trees = 1000
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+xgb_spec
+```
+
+
+
+```{r}
+desp_wf <- workflow() %>%
+  add_formula(LOCALIZADO_VIVO_MUERTO ~ .)
+
+desp_wf
+```
+
+```{r}
+xgb_rs <- desp_wf %>%
+  add_model(xgb_spec) %>%
+  fit_resamples(
+    resamples = desp_validation,
+    control = control_resamples(save_pred = TRUE),
+    metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy)
+  )
+
+xgb_rs
+```
+
+
+
+# Evaluate 
+```{r}
+collect_metrics(xgb_rs)
+```
+
+
+
+
+```{r}
+xgb_rs %>%
+  conf_mat_resampled()
+```
+
+
+
+
+
+```{r}
+xgb_rs %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(LOCALIZADO_VIVO_MUERTO, .pred_VIVO) %>%
+  mutate(model = "XGboost") %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(linewidth = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "turbo", end = .6) +
+  theme_minimal() +
+  labs(title = "AUC XGboost",
+       subtitle = "On training and validation set")
+```
+
+
+
+### Test set 
+
+```{r}
+desp_final <- desp_wf %>%
+  add_model(xgb_spec) %>%
+  last_fit(splits,
+           metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy)
+           )
+
+desp_final
+
+```
+
+
+
+
+```{r}
+collect_metrics(desp_final)
+```
+
+
+
+```{r}
+collect_predictions(desp_final) %>%
+  conf_mat(LOCALIZADO_VIVO_MUERTO, .pred_class)
+```
+
+
+
+
+```{r}
+xgb_fit <- extract_fit_parsnip(desp_final)
+vip(xgb_fit, geom = "point")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,448 @@
+---
+title: "baseline-timecv"
+output: html_document
+date: "2023-05-02"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = FALSE,
+                      warning = FALSE,
+                      cache = FALSE,
+                      fig.width = 8, 
+                      fig.height = 6)
+```
+
+
+
+
+```{r}
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(here, tidyverse, tidymodels, GGally, vip,
+               naniar, rlang, svglite)
+
+
+desp_data <- read_rds(here("import", "output", "baseline.rds")) %>% 
+  filter(YEAR_EVENTO >= 2006 & YEAR_EVENTO <= 2022 &
+           LOCALIZADO_VIVO_MUERTO != "SIGUE DESAPARECIDA" & DIFF_DIAS >= 0 &
+           DIFF_DIAS < 32929) %>% 
+  add_column(runif = runif(nrow(.))) %>% 
+  rename(RANDOM = runif)
+```
+
+
+```{r}
+# Files -------------------------------------------------------------------
+files <- list(aucs_baseline = here("output-models", "aucs-baselines.")
+              )
+
+
+
+
+devices <- c("png", "svg")
+```
+
+
+
+
+```{r}
+desp_data %>% 
+  summarise(max = max(DIFF_DIAS, na.rm = T),
+            min = min(DIFF_DIAS, na.rm = T),
+            mean = mean(DIFF_DIAS, na.rm = T),
+            sd = sd(DIFF_DIAS, na.rm = T))
+```
+
+
+
+# 1. Explore 
+Vars: LOCALIZADO_VIVO_MUERTO, SEXO_D, EDAD_D, CATEGORIA, YEAR_EVENTO, DIFF_DIAS
+
+
+```{r}
+gg_miss_var(desp_data)
+```
+
+
+
+
+```{r}
+ggpairs(desp_data, mapping = aes(color = LOCALIZADO_VIVO_MUERTO), columns = c("SEXO_D", "EDAD_D", "YEAR_EVENTO", "DIFF_DIAS", "RANDOM",  "CATEGORIA")) +
+  theme_minimal()
+```
+
+
+# 2. SPLIT DATA  
+
+
+```{r}
+## prepare data 
+final_df <- desp_data %>% 
+  arrange(YEAR_EVENTO) %>% 
+  na.omit() %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate(LOCALIZADO_VIVO_MUERTO = 
+           factor(LOCALIZADO_VIVO_MUERTO, levels = c("VIVO", "MUERTO"))
+         )
+```
+
+
+```{r}
+desp_data %>% count(LOCALIZADO_VIVO_MUERTO)
+```
+
+
+
+```{r}
+set.seed(123)
+splits  <- initial_time_split(final_df, strata = LOCALIZADO_VIVO_MUERTO)
+
+desp_train <- training(splits)
+desp_test <- testing(splits)
+```
+
+
+```{r}
+desp_train %>% count(YEAR_EVENTO, sort = T)
+```
+
+
+```{r}
+desp_test %>% count(YEAR_EVENTO, sort = T)
+```
+
+
+
+```{r}
+set.seed(234)
+desp_validation <- validation_time_split(desp_train, strata = LOCALIZADO_VIVO_MUERTO)
+desp_validation
+```
+
+
+# Prepare models 
+
+```{r}
+### logistic regression 
+glm_spec <- logistic_reg() %>%
+  set_engine("glm") %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors())
+
+glm_spec
+```
+
+
+
+```{r}
+### Decision tree
+tree_spec <-
+  decision_tree() %>%
+  set_mode("classification") %>%
+  set_engine("rpart") %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors())
+
+tree_spec
+```
+
+
+```{r}
+## Random forest 
+rf_spec <- rand_forest() %>%
+  set_mode("classification") %>%
+  set_engine("ranger", importance = "permutation")
+
+rf_spec
+```
+
+```{r}
+xgb_spec <- boost_tree(
+  trees = 1000
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+xgb_spec
+```
+
+
+
+```{r}
+desp_wf <- workflow() %>%
+  add_formula(LOCALIZADO_VIVO_MUERTO ~ .)
+
+desp_wf
+```
+
+
+### Fit models on traint/validation
+
+```{r}
+glm_rs <- desp_wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples = desp_validation,
+    control = control_resamples(save_pred = TRUE),
+    metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy, sensitivity, specificity)
+  )
+
+glm_rs
+```
+
+
+
+```{r}
+tree_rs <- desp_wf %>%
+  add_model(tree_spec) %>%
+  fit_resamples(
+    resamples = desp_validation,
+    control = control_resamples(save_pred = TRUE),
+    metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy, sensitivity, specificity)
+  )
+
+tree_rs
+```
+
+
+```{r}
+rf_rs <- desp_wf %>%
+  add_model(rf_spec) %>%
+  fit_resamples(
+    resamples = desp_validation,
+    control = control_resamples(save_pred = TRUE),
+    metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy, sensitivity, specificity)
+  )
+
+rf_rs
+```
+
+
+
+```{r}
+xgb_rs <- desp_wf %>%
+  add_model(xgb_spec) %>%
+  fit_resamples(
+    resamples = desp_validation,
+    control = control_resamples(save_pred = TRUE),
+    metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy, sensitivity, specificity)
+  )
+
+xgb_rs
+```
+
+
+
+# Evaluate 
+
+## GLM 
+
+```{r}
+collect_metrics(glm_rs)
+```
+
+```{r}
+collect_metrics(glm_rs) %>% 
+  select(.metric, mean) %>% 
+  filter(.metric == "sensitivity" | .metric == "specificity") %>% 
+  pivot_wider(names_from = .metric,
+              values_from = mean) %>% 
+  mutate(gmean = sqrt(sensitivity*specificity))
+  
+```
+
+
+```{r}
+glm_rs %>%
+  conf_mat_resampled()
+```
+
+
+
+```{r}
+glm_auc <- glm_rs %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(LOCALIZADO_VIVO_MUERTO, .pred_VIVO) %>%
+  mutate(model = "GLM")
+```
+
+
+
+## Decision tree 
+
+```{r}
+collect_metrics(tree_rs)
+```
+
+```{r}
+#gmean 
+collect_metrics(tree_rs) %>% 
+  select(.metric, mean) %>% 
+  filter(.metric == "sensitivity" | .metric == "specificity") %>% 
+  pivot_wider(names_from = .metric,
+              values_from = mean) %>% 
+  mutate(gmean = sqrt(sensitivity*specificity))
+```
+
+
+```{r}
+tree_rs %>%
+  conf_mat_resampled()
+```
+
+
+
+```{r}
+tree_auc <- tree_rs %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(LOCALIZADO_VIVO_MUERTO, .pred_VIVO) %>%
+  mutate(model = "Decision tree")
+```
+
+
+
+
+### Random forest 
+
+```{r}
+collect_metrics(rf_rs)
+```
+
+```{r}
+#gmean 
+collect_metrics(rf_rs) %>% 
+  select(.metric, mean) %>% 
+  filter(.metric == "sensitivity" | .metric == "specificity") %>% 
+  pivot_wider(names_from = .metric,
+              values_from = mean) %>% 
+  mutate(gmean = sqrt(sensitivity*specificity))
+```
+
+
+
+```{r}
+rf_rs %>%
+  conf_mat_resampled()
+```
+
+
+```{r}
+rf_auc <-rf_rs %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(LOCALIZADO_VIVO_MUERTO, .pred_VIVO) %>%
+  mutate(model = "Random Forest")
+```
+
+
+## XGboost 
+```{r}
+collect_metrics(xgb_rs)
+```
+
+```{r}
+#gmean 
+collect_metrics(xgb_rs) %>% 
+  select(.metric, mean) %>% 
+  filter(.metric == "sensitivity" | .metric == "specificity") %>% 
+  pivot_wider(names_from = .metric,
+              values_from = mean) %>% 
+  mutate(gmean = sqrt(sensitivity*specificity))
+```
+
+
+
+```{r}
+xgb_rs %>%
+  conf_mat_resampled()
+```
+
+```{r}
+xgb_auc <-xgb_rs %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(LOCALIZADO_VIVO_MUERTO, .pred_VIVO) %>%
+  mutate(model = "XGboost")
+```
+
+
+
+### Compare AUCs
+```{r}
+bind_rows(glm_auc, tree_auc, rf_auc, xgb_auc) %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(linewidth = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "turbo", end = .6) +
+  theme_minimal() +
+  labs(title = "AUC comparison - baseline models",
+       subtitle = "On training and validation set")
+
+walk(devices, ~ ggsave(filename = file.path(paste0(files$aucs_baseline, .x)),
+                     device = .x, width = 10, height = 8))
+```
+
+
+
+### Test set 
+
+```{r}
+desp_final <- desp_wf %>%
+  add_model(rf_spec) %>%
+  last_fit(splits,
+           metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy, sensitivity, specificity)
+           )
+
+desp_final
+```
+
+
+
+
+```{r}
+collect_metrics(desp_final)
+```
+
+```{r}
+collect_metrics(desp_final) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric == "sensitivity" | .metric == "specificity") %>% 
+  pivot_wider(names_from = .metric,
+              values_from = .estimate) %>% 
+  mutate(gmean = sqrt(sensitivity*specificity))
+```
+
+
+```{r}
+collect_predictions(desp_final) %>%
+  conf_mat(LOCALIZADO_VIVO_MUERTO, .pred_class)
+```
+
+
+
+```{r}
+## OJO LO ESTO NO PASA CUANDO USO IMPURITY EN LUGAR DE PERMUTATION COMO MÉTODO PARA RF
+## ¿QUÉ SE HACE?
+## https://alexisperrier.com/datascience/2015/08/27/feature-importance-random-forests-gini-accuracy.html
+
+desp_final %>%
+ extract_fit_parsnip() %>% 
+  vip() +
+  theme_minimal() +
+  labs(title = "Variable importance on test set",
+      subtitle = "Random forest")
+```
+
+
+
+
+
+
+
+

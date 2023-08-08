@@ -1,0 +1,201 @@
+---
+title: "munis-model-vivos"
+author: "Jorge Ruiz"
+date: "2023-06-12"
+output: html_document
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = FALSE,
+                      warning = FALSE,
+                      cache = FALSE,
+                      fig.width = 8, 
+                      fig.height = 6)
+```
+
+
+
+
+```{r}
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(here, tidyverse, tidymodels, vip,
+               naniar, rlang)
+
+
+cobupem_data <- read_rds(here("join", "output", "cobupem_clean_final.rds")) %>%
+   filter(year_evento >= 2006 & year_evento <= 2022 &
+          localizado_vivo_muerto != "SIGUE DESAPARECIDA" & diff_dias >= 0 &
+           diff_dias < 32929) %>% 
+  add_column(runif = runif(nrow(.))) %>% 
+  rename(RANDOM = runif) %>% 
+  select(-expediente, -status, -localizado_fecha,
+         -text_cobupem, -year_localizado, -municipio_evento,
+         -fecha_evento,  -women_exec_mun_mx, -idunico) %>% 
+  mutate(categoria = replace_na(categoria, "UNKNOWN"),
+         fiscalia = replace_na(fiscalia, "UNKNOWN"),
+         escolaridad_d = replace_na(escolaridad_d, "UNKNOWN"),
+         iba_solo = replace_na(iba_solo, "UNKNOWN"),
+         estado_civil_d = replace_na(estado_civil_d, "UNKNOWN")) %>% 
+  mutate_if(is.character, as.factor) %>% 
+  drop_na(inegi)  %>% 
+  arrange(year_evento)  %>% 
+  mutate(localizado_vivo_muerto = 
+           factor(localizado_vivo_muerto, levels = c("VIVO", "MUERTO"))
+         ) %>% 
+   mutate_at(vars(pct_hypertension_hq, women_leg_mun_mx, state_capacity, leader_experience_mun_mx, talla_d),~ifelse(is.na(.x), mean(.x, na.rm = TRUE), .x)) %>% 
+  select(-inegi)
+```
+
+
+
+# split data
+
+```{r}
+set.seed(123)
+splits  <- initial_time_split(cobupem_data, strata = localizado_vivo_muerto)
+
+cobupem_train <- training(splits)
+cobupem_test <- testing(splits)
+```
+
+
+```{r}
+cobupem_train %>% count(year_evento, sort = T)
+```
+
+```{r}
+cobupem_test %>% count(year_evento, sort = T)
+```
+
+
+
+
+```{r}
+set.seed(234)
+cobupem_validation <- validation_time_split(cobupem_train, strata = localizado_vivo_muerto)
+cobupem_validation
+```
+
+
+# Prepare model
+
+```{r}
+## Random forest 
+rf_spec <- rand_forest() %>%
+  set_mode("classification") %>%
+  set_engine("ranger", importance = "permutation")
+
+rf_spec
+```
+
+
+```{r}
+desp_wf <- workflow() %>%
+  add_formula(localizado_vivo_muerto ~ .)
+
+desp_wf
+```
+
+
+### Fit models on traint/validation
+
+```{r}
+rf_rs <- desp_wf %>%
+  add_model(rf_spec) %>%
+  fit_resamples(
+    resamples = cobupem_validation,
+    control = control_resamples(save_pred = TRUE),
+    metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy, sensitivity, specificity)
+  )
+
+rf_rs
+```
+
+
+
+# Evaluate 
+```{r}
+collect_metrics(rf_rs)
+```
+
+```{r}
+collect_metrics(rf_rs) %>% 
+  select(.metric, mean) %>% 
+  filter(.metric == "sensitivity" | .metric == "specificity") %>% 
+  pivot_wider(names_from = .metric,
+              values_from = mean) %>% 
+  mutate(gmean = sqrt(sensitivity*specificity))
+```
+
+```{r}
+rf_rs %>%
+  conf_mat_resampled()
+```
+
+
+
+```{r}
+rf_rs %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(localizado_vivo_muerto, .pred_VIVO) %>%
+  mutate(model = "Random Forest")  %>%
+  ggplot(aes(1 - specificity, sensitivity, color = id)) +
+  geom_abline(lty = 2, color = "gray80", size = 1.5) +
+  geom_path(show.legend = FALSE, alpha = 0.6, size = 1.2) +
+  coord_equal()
+```
+
+
+
+```{r}
+### Test set 
+desp_final <- desp_wf %>%
+  add_model(rf_spec) %>%
+  last_fit(splits,
+           metrics = metric_set(roc_auc, accuracy, f_meas, bal_accuracy, sensitivity, specificity)
+           )
+
+desp_final
+```
+
+
+
+
+```{r}
+collect_metrics(desp_final)
+```
+
+
+
+```{r}
+collect_predictions(desp_final) %>%
+  conf_mat(localizado_vivo_muerto, .pred_class)
+```
+
+
+```{r}
+## OJO LO ESTO NO PASA CUANDO USO IMPURITY EN LUGAR DE PERMUTATION COMO MÉTODO PARA RF
+## ¿QUÉ SE HACE?
+## https://alexisperrier.com/datascience/2015/08/27/feature-importance-random-forests-gini-accuracy.html
+
+desp_final %>%
+ extract_fit_parsnip() %>% 
+  vip() +
+  theme_minimal() +
+  labs(title = "Variable importance on test set",
+      subtitle = "Random forest")
+```
+
+
+
+
+
+
+
+
+
+
